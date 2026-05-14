@@ -57,14 +57,26 @@ jobs:
       - name: دریافت لینک‌های استریم از Piped
         run: |
           VID="${{ env.VID }}"
-          # لیست نمونه‌های Piped (ترجیحاً سریع)
+          # لیست کامل و به‌روز شده از نمونه‌های Piped
           INSTANCES=(
-            "https://pipedapi.kavin.rocks"
+            "https://pipedapi.kavin.rocks"        # Official
+            "https://pipedapi-libre.kavin.rocks"  # Official Libre
+            "https://pipedapi.leptons.xyz"
+            "https://pipedapi.nosebs.ru"
+            "https://piped-api.privacy.com.de"
+            "https://pipedapi.adminforge.de"
+            "https://api.piped.yt"
+            "https://pipedapi.drgns.space"
+            "https://pipedapi.owo.si"
+            "https://pipedapi.ducks.party"
+            "https://piped-api.codespace.cz"
+            "https://pipedapi.reallyaweso.me"
+            "https://api.piped.private.coffee"
+            "https://pipedapi.darkness.services"
+            "https://pipedapi.orangenet.cc"
             "https://pipedapi.tokhmi.xyz"
             "https://pipedapi.syncpundit.io"
             "https://pipedapi.moomoo.me"
-            "https://pipedapi.adminforge.de"
-            "https://pipedapi.leptons.xyz"
           )
           STREAMS=""
           for BASE in "${INSTANCES[@]}"; do
@@ -72,11 +84,14 @@ jobs:
             RESP=$(curl -s --max-time 15 "${BASE}/streams/${VID}")
             if echo "$RESP" | jq -e '.videoStreams' >/dev/null 2>&1; then
               STREAMS="$RESP"
+              echo "اتصال موفقیت‌آمیز به $BASE"
               break
+            else
+              echo "ناموفق: $BASE"
             fi
           done
           if [ -z "$STREAMS" ]; then
-            echo "::error::هیچ نمونه Piped در دسترس نیست"
+            echo "::error::هیچ نمونه Piped در دسترس نیست. لطفاً کمی بعد دوباره تلاش کنید."
             exit 1
           fi
           echo "$STREAMS" > streams.json
