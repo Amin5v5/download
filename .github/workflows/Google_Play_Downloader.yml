@@ -1,145 +1,178 @@
-name: دانلود فایل نصبی گوگل پلی
+name: 'دانلود APK (بدون نیاز به حساب)'
 
 on:
   workflow_dispatch:
     inputs:
       package_name:
-        description: 'Package name (e.g., com.google.android.youtube)'
+        description: 'نام پکیج برنامه یا لینک گوگل‌پلی (مثلاً com.whatsapp)'
         required: true
         type: string
-      architecture:
-        description: 'Target architecture'
-        required: true
-        type: choice
-        default: 'arm64'
-        options:
-          - arm64
-          - armv7
-      merge_splits:
-        description: 'Merge split APKs into single installable APK'
-        required: false
-        type: boolean
-        default: true
+        default: ''
       output_folder:
-        description: 'Output folder (relative to repo root)'
+        description: 'پوشه ذخیره‌سازی (نسبت به ریشه مخزن)'
         required: false
         type: string
-        default: 'downloads'
+        default: 'downloads/GooglePlay'
+      architecture:
+        description: 'معماری پردازنده'
+        required: false
+        type: choice
+        options:
+          - 'arm64-v8a'
+          - 'auto (همه)'
+          - 'armeabi-v7a'
+          - 'x86'
+          - 'x86_64'
+        default: 'arm64-v8a'
+      max_part_mb:
+        description: 'حداکثر اندازه هر قطعه (MB) – 0 = بدون تقسیم'
+        required: false
+        type: number
+        default: 90
 
 permissions:
   contents: write
 
 jobs:
-  download-apk:
+  download:
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v4
+
+      - name: کش کردن apkeep
+        id: cache-apkeep
+        uses: actions/cache@v4
         with:
-          fetch-depth: 1
+          path: /usr/local/bin/apkeep
+          key: ${{ runner.os }}-apkeep-v0.18.0
 
-      - name: Create output folder
-        run: mkdir -p "${{ inputs.output_folder }}"
-
-      - name: Install system dependencies
+      - name: دانلود و نصب apkeep
+        if: steps.cache-apkeep.outputs.cache-hit != 'true'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y openjdk-17-jre-headless apksigner python3 python3-venv python3-pip curl git
+          curl -sL https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu -o apkeep
+          chmod +x apkeep
+          sudo mv apkeep /usr/local/bin/apkeep
 
-      - name: Clone gplay-apk-downloader
+      - name: استخراج نام پکیج
         run: |
-          git clone https://github.com/alltechdev/gplay-apk-downloader.git
-          cd gplay-apk-downloader
-          ./setup.sh
-
-      - name: Authenticate with Google Play
-        run: |
-          cd gplay-apk-downloader
-          echo "y" | ./gplay auth
-          echo "Authentication completed."
-
-      - name: Download APK
-        id: download
-        run: |
-          cd gplay-apk-downloader
-          ARCH="${{ inputs.architecture }}"
-          MERGE="${{ inputs.merge_splits }}"
-          OUTPUT_DIR="../${{ inputs.output_folder }}"
-          
-          CMD="./gplay download ${{ inputs.package_name }} -a $ARCH -o $OUTPUT_DIR"
-          if [ "$MERGE" = "true" ]; then
-            CMD="$CMD -m"
-          fi
-          
-          echo "Running: $CMD"
-          $CMD
-          
-          # Find downloaded file(s)
-          cd "$OUTPUT_DIR"
-          if [ "$MERGE" = "true" ]; then
-            DOWNLOADED_FILE=$(ls -1 *.apk 2>/dev/null | head -n1)
+          INPUT="${{ github.event.inputs.package_name }}"
+          if [[ "$INPUT" =~ play.google.com/store/apps/details\?id=([^&]+) ]]; then
+            PACKAGE="${BASH_REMATCH[1]}"
           else
-            DOWNLOADED_FILE=$(ls -1 *.apk *.zip 2>/dev/null | head -n1)
+            PACKAGE="$INPUT"
           fi
-          
+          echo "PACKAGE=$PACKAGE" >> $GITHUB_ENV
+          echo "📦 نام پکیج: $PACKAGE"
+
+      - name: دانلود فایل از APKPure
+        run: |
+          mkdir -p /tmp/apkeep_dl
+          apkeep -a "$PACKAGE" /tmp/apkeep_dl
+
+      - name: فیلتر دقیق معماری و ادغام در یک APK
+        run: |
+          BASE_FOLDER="${{ github.event.inputs.output_folder }}"
+          DATE_PART=$(date +'%Y.%m.%d')
+          PACKAGE="${{ env.PACKAGE }}"
+          ARCH="${{ github.event.inputs.architecture }}"
+          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
+          FINAL_DIR="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
+          mkdir -p "$FINAL_DIR"
+
+          # پیدا کردن فایل دانلود شده
+          DOWNLOADED_FILE=$(find /tmp/apkeep_dl -maxdepth 1 -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.apks' \) -print -quit 2>/dev/null)
           if [ -z "$DOWNLOADED_FILE" ]; then
-            echo "Error: No file downloaded"
+            echo "❌ هیچ فایلی دانلود نشد"
             exit 1
           fi
-          
-          echo "downloaded_file_path=$OUTPUT_DIR/$DOWNLOADED_FILE" >> $GITHUB_OUTPUT
-          echo "downloaded_file_name=$DOWNLOADED_FILE" >> $GITHUB_OUTPUT
 
-      - name: Generate timestamp for unique archive
-        id: timestamp
-        run: echo "value=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_OUTPUT
+          echo "📂 فایل اصلی: $(basename "$DOWNLOADED_FILE")"
 
-      - name: Create split archive (85MB chunks)
-        run: |
-          DOWNLOADED_FILE="${{ steps.download.outputs.downloaded_file_path }}"
-          TIMESTAMP="${{ steps.timestamp.outputs.value }}"
-          PACKAGE_NAME="${{ inputs.package_name }}"
-          ARCH="${{ inputs.architecture }}"
-          
-          # Create archive name
-          if [ "${{ inputs.merge_splits }}" = "true" ]; then
-            ARCHIVE_NAME="${PACKAGE_NAME}_${ARCH}_merged_${TIMESTAMP}"
-          else
-            ARCHIVE_NAME="${PACKAGE_NAME}_${ARCH}_splits_${TIMESTAMP}"
-          fi
-          
-          cd "${{ inputs.output_folder }}"
-          
-          # Compress and split the downloaded file(s)
-          if [ "${{ inputs.merge_splits }}" = "true" ]; then
-            # Single APK file - split into chunks
-            7z a -mx=3 -v85m "${ARCHIVE_NAME}.7z" "$(basename "$DOWNLOADED_FILE")"
-          else
-            # Multiple split files - use separate archive for each
-            mkdir -p "${ARCHIVE_NAME}_contents"
-            cp "$(basename "$DOWNLOADED_FILE")" "${ARCHIVE_NAME}_contents/"
-            7z a -mx=3 -v85m "${ARCHIVE_NAME}.7z" "${ARCHIVE_NAME}_contents/"
-          fi
-          
-          # Rename single-chunk archive to .7z
-          if [ -f "${ARCHIVE_NAME}.7z.001" ] && [ ! -f "${ARCHIVE_NAME}.7z.002" ]; then
-            mv "${ARCHIVE_NAME}.7z.001" "${ARCHIVE_NAME}.7z"
-          fi
-
-      - name: Remove original downloaded file(s)
-        run: |
-          DOWNLOADED_FILE="${{ steps.download.outputs.downloaded_file_path }}"
-          if [[ -n "$DOWNLOADED_FILE" && -f "$DOWNLOADED_FILE" ]]; then
+          # استخراج در صورت نیاز
+          if [[ "$DOWNLOADED_FILE" == *.xapk ]] || [[ "$DOWNLOADED_FILE" == *.apks ]]; then
+            TEMP_EXTRACT="/tmp/extracted_apks"
+            mkdir -p "$TEMP_EXTRACT"
+            unzip -o "$DOWNLOADED_FILE" -d "$TEMP_EXTRACT"
             rm "$DOWNLOADED_FILE"
+            APK_SOURCE="$TEMP_EXTRACT"
+          else
+            APK_SOURCE="/tmp/apkeep_dl"
           fi
-          # Also remove any extracted directories
-          rm -rf "${{ inputs.output_folder }}"/*_contents/
 
-      - name: Commit and push
+          # جمع‌آوری APKهای معتبر
+          VALID_APKS=()
+          for apk in "$APK_SOURCE"/*.apk; do
+            [ -f "$apk" ] || continue
+            apk_name=$(basename "$apk")
+
+            if [ "$ARCH" = "auto (همه)" ]; then
+              VALID_APKS+=("$apk")
+              continue
+            fi
+
+            # فیلتر هوشمند: base و config همیشه لازم‌اند
+            if [[ "$apk_name" == "base.apk" ]] || [[ "$apk_name" == config.* ]]; then
+              VALID_APKS+=("$apk")
+            elif [[ "$apk_name" == *"${ARCH}"* ]]; then
+              VALID_APKS+=("$apk")
+            else
+              echo "⏭️  حذف (معماری متفاوت): $apk_name"
+            fi
+          done
+
+          if [ ${#VALID_APKS[@]} -eq 0 ]; then
+            echo "❌ هیچ APK معتبری برای معماری $ARCH یافت نشد"
+            exit 1
+          fi
+
+          # ادغام به یک APK (با استفاده از bundletool یا zip)
+          if [ ${#VALID_APKS[@]} -eq 1 ]; then
+            # فقط یک فایل APK
+            FINAL_NAME="${DATE_PART} - ${PACKAGE}.apk"
+            SIZE=$(stat -c%s "${VALID_APKS[0]}")
+            MAX_BYTES=$((THRESH_MB * 1024 * 1024))
+            if [ "$THRESH_MB" -gt 0 ] && [ "$SIZE" -gt "$MAX_BYTES" ]; then
+              echo "✂️ تقسیم فایل (حجم: $((SIZE/1024/1024))MB)"
+              zip -j -s "${THRESH_MB}m" "$FINAL_DIR/${FINAL_NAME}.zip" "${VALID_APKS[0]}"
+            else
+              cp "${VALID_APKS[0]}" "$FINAL_DIR/$FINAL_NAME"
+            fi
+          else
+            # چندین APK (Split) -> ساخت .apks قابل نصب با SAI
+            echo "🔄 ادغام ${#VALID_APKS[@]} فایل Split APK در یک بسته .apks"
+            TEMP_MERGE="/tmp/merge_apks"
+            mkdir -p "$TEMP_MERGE"
+            for vapk in "${VALID_APKS[@]}"; do
+              cp "$vapk" "$TEMP_MERGE/"
+            done
+            FINAL_ARCHIVE="${DATE_PART} - ${PACKAGE}.apks"
+            cd "$TEMP_MERGE" || exit 1
+            zip -r "$FINAL_DIR/$FINAL_ARCHIVE" ./*.apk
+            cd - || exit 1
+            rm -rf "$TEMP_MERGE"
+          fi
+
+          # پاکسازی
+          rm -rf /tmp/apkeep_dl /tmp/extracted_apks 2>/dev/null
+
+      - name: نمایش لینک به فایل‌ها
+        run: |
+          FOLDER="${{ github.event.inputs.output_folder }}"
+          DATE_PART=$(date +'%Y.%m.%d')
+          PACKAGE="${{ env.PACKAGE }}"
+          REL_DIR="${FOLDER}/${DATE_PART} - ${PACKAGE}"
+          ENCODED_DIR=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${REL_DIR}', safe='/'))")
+          echo "### 📁 پوشه دانلود:" >> $GITHUB_STEP_SUMMARY
+          echo "[مشاهده فایل‌ها](https://github.com/${{ github.repository }}/tree/main/${ENCODED_DIR})" >> $GITHUB_STEP_SUMMARY
+
+      - name: ذخیره و آپلود در مخزن
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ inputs.output_folder }}/"
-          git commit -m "Download ${{ inputs.package_name }} (${{ inputs.architecture }}) from Google Play [skip ci]" || echo "No changes to commit"
+          git add "${{ github.event.inputs.output_folder }}/"
+          git commit -m "دانلود APK: ${{ env.PACKAGE }} [skip ci]" || echo "Nothing to commit"
           git push
