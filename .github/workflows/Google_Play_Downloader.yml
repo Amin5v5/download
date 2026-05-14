@@ -98,9 +98,18 @@ jobs:
           PACKAGE="$PACKAGE"
           ARCH="$ARCHITECTURE"
           THRESH_MB="$MAX_PART_MB"
-          FINAL_DIR="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
+          
+          # ساخت پوشه اختصاصی؛ اگر تکراری بود با شماره نام‌گذاری شود
+          BASE="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
+          FINAL_DIR="$BASE"
+          i=1
+          while [ -d "$FINAL_DIR" ]; do
+            FINAL_DIR="${BASE}_${i}"
+            i=$((i+1))
+          done
           mkdir -p "$FINAL_DIR"
           FINAL_DIR=$(realpath "$FINAL_DIR")
+          echo "FINAL_DIR=$FINAL_DIR" >> $GITHUB_ENV
 
           DOWNLOADED_FILE=$(find /tmp/apkeep_dl -maxdepth 1 -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.apks' \) -print -quit 2>/dev/null)
           if [ -z "$DOWNLOADED_FILE" ]; then
@@ -155,6 +164,9 @@ jobs:
             exit 1
           fi
 
+          # تشخیص split شدن بعد از این بلوک
+          echo "SPLIT=false" >> $GITHUB_ENV
+
           if [ ${#VALID_APKS[@]} -eq 1 ]; then
             FINAL_NAME="${DATE_PART} - ${PACKAGE}.apk"
             SIZE=$(stat -c%s "${VALID_APKS[0]}")
@@ -162,6 +174,7 @@ jobs:
             if [ "$THRESH_MB" -gt 0 ] && [ "$SIZE" -gt "$MAX_BYTES" ]; then
               echo "✂️ تقسیم فایل"
               zip -j -s "${THRESH_MB}m" "$FINAL_DIR/${FINAL_NAME}.zip" "${VALID_APKS[0]}"
+              echo "SPLIT=true" >> $GITHUB_ENV
             else
               cp "${VALID_APKS[0]}" "$FINAL_DIR/$FINAL_NAME"
             fi
@@ -181,12 +194,26 @@ jobs:
 
           rm -rf /tmp/apkeep_dl /tmp/extracted_apks 2>/dev/null
 
-      - name: نمایش لینک
+      - name: 🔗 نمایش لینک هوشمند به فایل‌ها
         run: |
-          REL_DIR="${OUTPUT_FOLDER}/$(date +'%Y.%m.%d') - ${PACKAGE}"
+          FOLDER="$FINAL_DIR"
+          REL_DIR="${FOLDER#/home/runner/work/*/}"  # مسیر نسبی داخل ریپو
+          # روش دقیق‌تر: حذف مسیر مطلق workspace
+          WORKSPACE="${{ github.workspace }}"
+          REL_DIR=$(echo "$FOLDER" | sed "s|^${WORKSPACE}/||")
           ENCODED_DIR=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${REL_DIR}', safe='/'))")
-          echo "### 📁 پوشه دانلود:" >> $GITHUB_STEP_SUMMARY
-          echo "[مشاهده فایل‌ها](https://github.com/${{ github.repository }}/tree/main/${ENCODED_DIR})" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$SPLIT" = "true" ]; then
+            echo "### 📁 فایل‌ها (چند تکه):" >> $GITHUB_STEP_SUMMARY
+            echo "[مشاهده پوشه دانلود](https://github.com/${{ github.repository }}/tree/main/${ENCODED_DIR})" >> $GITHUB_STEP_SUMMARY
+          else
+            # یک فایل سالم داریم؛ لینک مستقیم raw
+            FILE=$(ls "$FOLDER" | head -1)
+            ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FILE}', safe=''))")
+            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${ENCODED_DIR}/${ENCODED_FILE}"
+            echo "### 📁 فایل دانلود شده:" >> $GITHUB_STEP_SUMMARY
+            echo "[دانلود مستقیم ${FILE}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: ذخیره و آپلود
         run: |
