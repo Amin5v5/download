@@ -51,8 +51,6 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      # ==================== حالت سریع: بدون checkout ====================
-      # اگر حالت Fast باشد، این مرحله اجرا نمی‌شود
       - name: ⚡️ Checkout (only for Full mode)
         if: github.event.inputs.mode == 'Full (دانلود + commit در مخزن)' || github.event_name == 'repository_dispatch'
         uses: actions/checkout@v4
@@ -60,7 +58,6 @@ jobs:
           fetch-depth: 1
           filter: blob:none
 
-      # ==================== تنظیم متغیرها ====================
       - name: ⚙️ Set variables from repository_dispatch
         if: github.event_name == 'repository_dispatch'
         run: |
@@ -83,7 +80,6 @@ jobs:
           echo "ARCHITECTURE=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
           echo "MAX_PART_MB=${{ github.event.inputs.max_part_mb }}" >> $GITHUB_ENV
 
-      # ==================== کش و نصب apkeep ====================
       - name: 💾 Cache apkeep
         id: cache-apkeep
         uses: actions/cache@v4
@@ -111,7 +107,6 @@ jobs:
           mkdir -p /tmp/apkeep_dl
           apkeep -a "$PACKAGE" /tmp/apkeep_dl
 
-      # ==================== پردازش فایل (ادغام، فیلتر، تقسیم) ====================
       - name: 🧩 Process APK
         id: process-apk
         run: |
@@ -121,9 +116,10 @@ jobs:
           ARCH="$ARCHITECTURE"
           THRESH_MB="$MAX_PART_MB"
 
-          # در حالت Fast، پوشه موقت برای آپلود آرتیفکت
+          # تعیین پوشه نهایی بر اساس حالت
           if [ "$MODE" = "Fast" ]; then
-            FINAL_DIR="/tmp/apk_output"
+            # در حالت Fast، از پوشه workspace استفاده کن (قابل اطمینان‌تر از /tmp)
+            FINAL_DIR="$GITHUB_WORKSPACE/fast_output"
           else
             BASE="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
             FINAL_DIR="$BASE"
@@ -234,7 +230,6 @@ jobs:
           echo "STATUS=success" >> $GITHUB_ENV
           rm -rf /tmp/apkeep_dl /tmp/extracted_apks 2>/dev/null
 
-      # ==================== مرحله نمایش نتیجه (مشترک) ====================
       - name: 📊 نمایش جدول وضعیت و لینک (فارسی)
         run: |
           SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
@@ -259,10 +254,11 @@ jobs:
           echo "| $STATUS_FA | \`$PACKAGE\` | \`$ARCHITECTURE\` | \`$FINAL_FILENAME\` | $SIZE_HR | $(date +'%Y-%m-%d %H:%M:%S') |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          # در حالت Fast لینک دانلود وجود ندارد (فقط Artifact)
           if [ "$MODE" = "Fast" ]; then
             echo "### ⚡️ حالت سریع: فایل به عنوان Artifact ذخیره شد" >> $GITHUB_STEP_SUMMARY
-            echo "بعد از اتمام کار، می‌توانید فایل را از بخش **Actions** → **این اجرا** → **Artifacts** دانلود کنید." >> $GITHUB_STEP_SUMMARY
+            echo "بعد از اتمام کار، می‌توانید فایل را از بخش **Actions** → **این اجرا** → **Artifacts** (پایین همین صفحه) دانلود کنید." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "> 📌 فایل دانلودی تا **90 روز** در GitHub نگهداری می‌شود، سپس به‌طور خودکار پاک می‌گردد." >> $GITHUB_STEP_SUMMARY
           else
             WORKSPACE="${{ github.workspace }}"
             REL_DIR=$(echo "$FINAL_DIR" | sed "s|^${WORKSPACE}/||")
@@ -280,7 +276,15 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> 🕒 زمان اتمام: $(date)" >> $GITHUB_STEP_SUMMARY
 
-      # ==================== حالت کامل: commit و push ====================
+      - name: ✅ Verify artifact file exists (Fast mode)
+        if: env.MODE == 'Fast' && env.STATUS == 'success'
+        run: |
+          if [ ! -f "$FINAL_DIR/$FINAL_FILENAME" ]; then
+            echo "ERROR: File not found at $FINAL_DIR/$FINAL_FILENAME"
+            exit 1
+          fi
+          echo "File size: $(stat -c%s "$FINAL_DIR/$FINAL_FILENAME") bytes"
+
       - name: 💾 Save and upload to repository (Full mode only)
         if: env.MODE == 'Full'
         run: |
@@ -290,7 +294,6 @@ jobs:
           git commit -m "Download APK: $PACKAGE [skip ci]" || true
           git push
 
-      # ==================== حالت سریع: آپلود به عنوان Artifact ====================
       - name: 📦 Upload APK as Artifact (Fast mode only)
         if: env.MODE == 'Fast' && env.STATUS == 'success'
         uses: actions/upload-artifact@v4
@@ -298,4 +301,4 @@ jobs:
           name: "APK - ${{ env.PACKAGE }} - ${{ env.ARCHITECTURE }}"
           path: "${{ env.FINAL_DIR }}/${{ env.FINAL_FILENAME }}"
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 90
