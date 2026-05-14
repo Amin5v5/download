@@ -1,232 +1,248 @@
-name: 'دانلود از گوگل پلی'
+name: 'دانلودر یوتیوب'
 
 on:
   workflow_dispatch:
     inputs:
-      package_name:
-        description: 'نام پکیج برنامه یا لینک گوگل‌پلی'
+      video_url:
+        description: 'YouTube video URL'
         required: true
         type: string
-        default: ''
-      output_folder:
-        description: 'پوشه ذخیره‌سازی'
-        required: false
-        type: string
-        default: 'downloads/GooglePlay'
-      architecture:
-        description: 'معماری پردازنده'
-        required: false
+      output_format:
+        description: 'نوع خروجی'
+        required: true
         type: choice
         options:
-          - 'arm64-v8a'
-          - 'auto (همه)'
-          - 'armeabi-v7a'
-          - 'x86'
-          - 'x86_64'
-        default: 'arm64-v8a'
+          - 'mp4 (video)'
+          - 'mp3 (audio only)'
+        default: 'mp4 (video)'
+      desired_quality:
+        description: 'کیفیت / بیتریت'
+        required: true
+        type: choice
+        options:
+          - '480p'
+          - '720p'
+          - '1080p'
+          - '360p'
+          - '192kbps'
+          - '320kbps'
+          - '128kbps'
+          - '64kbps'
+        default: '720p'
       max_part_mb:
-        description: 'حداکثر اندازه قطعه (MB)'
+        description: 'حداکثر حجم هر قسمت (MB) - 0 = خودکار ۱۸۰۰ مگابایت'
         required: false
-        type: number
-        default: 90
-  repository_dispatch:
-    types: [googleplay-download]
+        type: string
+        default: '90'
+      upload_method:
+        description: '📤 روش ذخیره نهایی'
+        required: true
+        type: choice
+        options:
+          - 'repository (push to repo)'
+          - 'release (GitHub Releases)'
+        default: 'repository (push to repo)'
+      release_tag:
+        description: '🏷️ نام تگ ریلیز (فقط در صورت انتخاب Release)'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
 
 jobs:
-  download:
+  youtube-download:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-
-      - name: تنظیم متغیرها از dispatch
-        if: github.event_name == 'repository_dispatch'
-        run: |
-          echo "PACKAGE=${{ github.event.client_payload.package_name }}" >> $GITHUB_ENV
-          echo "OUTPUT_FOLDER=${{ github.event.client_payload.output_folder || 'downloads/GooglePlay' }}" >> $GITHUB_ENV
-          echo "ARCHITECTURE=${{ github.event.client_payload.architecture || 'arm64-v8a' }}" >> $GITHUB_ENV
-          echo "MAX_PART_MB=${{ github.event.client_payload.max_part_mb || 90 }}" >> $GITHUB_ENV
-
-      - name: تنظیم متغیرها از workflow_dispatch
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "PACKAGE=${{ github.event.inputs.package_name }}" >> $GITHUB_ENV
-          echo "OUTPUT_FOLDER=${{ github.event.inputs.output_folder }}" >> $GITHUB_ENV
-          echo "ARCHITECTURE=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
-          echo "MAX_PART_MB=${{ github.event.inputs.max_part_mb }}" >> $GITHUB_ENV
-
-      - name: کش کردن apkeep
-        id: cache-apkeep
-        uses: actions/cache@v4
+      - name: 📂 Checkout Repository
+        uses: actions/checkout@v4
         with:
-          path: /usr/local/bin/apkeep
-          key: ${{ runner.os }}-apkeep-v0.18.0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: دانلود و نصب apkeep
-        if: steps.cache-apkeep.outputs.cache-hit != 'true'
+      - name: 🔧 Install Dependencies
         run: |
-          curl -sL https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu -o apkeep
-          chmod +x apkeep
-          sudo mv apkeep /usr/local/bin/apkeep
+          sudo apt-get update -qq
+          sudo apt-get install -y zip curl python3 python3-pip
+          pip3 install --quiet requests
 
-      - name: استخراج نام پکیج
+      - name: 🔗 Get Download Link
+        id: retrieve
         run: |
-          INPUT="$PACKAGE"
-          if [[ "$INPUT" =~ play.google.com/store/apps/details\?id=([^&]+) ]]; then
-            PACKAGE="${BASH_REMATCH[1]}"
-          else
-            PACKAGE="$INPUT"
-          fi
-          echo "PACKAGE=$PACKAGE" >> $GITHUB_ENV
-          echo "📦 نام پکیج: $PACKAGE"
+          python3 << 'EOF'
+          import os, sys, time, re, requests
 
-      - name: دانلود فایل از APKPure
+          URL = os.environ.get('INPUT_URL')
+          FMT = os.environ.get('INPUT_FORMAT')
+          QUAL = os.environ.get('INPUT_QUALITY')
+
+          is_audio = FMT == 'mp3'
+          if is_audio:
+              if 'kbps' not in QUAL:
+                  QUAL = '192kbps'
+          else:
+              if 'p' not in QUAL:
+                  QUAL = '720p'
+
+          payload = {
+              "url": URL,
+              "os": "linux",
+              "output": {"type": "audio" if is_audio else "video", "format": FMT}
+          }
+          if is_audio:
+              payload["audio"] = {"bitrate": QUAL}
+          else:
+              payload["output"]["quality"] = QUAL
+
+          s = requests.Session()
+          s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+          s.get("https://media.ytmp3.gg/")
+          resp = s.post("https://hub.ytconvert.org/api/download", json=payload, timeout=30)
+          resp.raise_for_status()
+          data = resp.json()
+          status_url = data.get('statusUrl')
+          title = data.get('title', 'video')
+          dl_url = None
+          for _ in range(150):
+              time.sleep(2)
+              r = s.get(status_url, timeout=20)
+              status = r.json()
+              if status.get('status') == 'completed':
+                  dl_url = status.get('downloadUrl')
+                  break
+              if status.get('status') == 'failed':
+                  print("::error::Server failed to prepare the video")
+                  sys.exit(1)
+
+          if not dl_url:
+              print("::error::Could not get download link")
+              sys.exit(1)
+
+          vid = re.search(r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})', URL)[1]
+          clean = re.sub(r'[^a-zA-Z0-9\-_()\[\]]', '_', title.replace(' ', '_'))
+          clean = re.sub(r'_+', '_', clean).strip('_')[:70] or vid
+          clean = clean.lstrip('-')
+          fname = f"{clean}_{vid}_{QUAL}.{FMT}"
+
+          with open(".download_info", "w", encoding="utf-8") as f:
+              f.write(f"{dl_url}\n{fname}\n{title}")
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"filename={fname}\n")
+              f.write(f"title={title}\n")
+              f.write(f"vid={vid}\n")   # برای نام پوشه
+          EOF
+        env:
+          INPUT_URL: ${{ github.event.inputs.video_url }}
+          INPUT_FORMAT: ${{ github.event.inputs.output_format == 'mp3 (audio only)' && 'mp3' || 'mp4' }}
+          INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
+
+      - name: 📥 Download File
         run: |
-          mkdir -p /tmp/apkeep_dl
-          apkeep -a "$PACKAGE" /tmp/apkeep_dl
-
-      - name: فیلتر معماری و ادغام APK
-        run: |
-          BASE_FOLDER="$OUTPUT_FOLDER"
-          DATE_PART=$(date +'%Y.%m.%d')
-          PACKAGE="$PACKAGE"
-          ARCH="$ARCHITECTURE"
-          THRESH_MB="$MAX_PART_MB"
-
-          BASE="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
-          FINAL_DIR="$BASE"
-          i=1
-          while [ -d "$FINAL_DIR" ]; do
-            FINAL_DIR="${BASE}_${i}"
-            i=$((i+1))
-          done
-          mkdir -p "$FINAL_DIR"
-          FINAL_DIR=$(realpath "$FINAL_DIR")
-          echo "FINAL_DIR=$FINAL_DIR" >> $GITHUB_ENV
-
-          DOWNLOADED_FILE=$(find /tmp/apkeep_dl -maxdepth 1 -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.apks' \) -print -quit 2>/dev/null)
-          if [ -z "$DOWNLOADED_FILE" ]; then
-            echo "❌ هیچ فایلی دانلود نشد"
-            exit 1
-          fi
-          echo "📂 فایل اصلی: $(basename "$DOWNLOADED_FILE")"
-
-          if [[ "$DOWNLOADED_FILE" == *.xapk ]] || [[ "$DOWNLOADED_FILE" == *.apks ]]; then
-            TEMP_EXTRACT="/tmp/extracted_apks"
-            mkdir -p "$TEMP_EXTRACT"
-            unzip -o "$DOWNLOADED_FILE" -d "$TEMP_EXTRACT"
-            rm "$DOWNLOADED_FILE"
-            APK_SOURCE="$TEMP_EXTRACT"
-          else
-            APK_SOURCE="/tmp/apkeep_dl"
-          fi
-
-          KNOWN_ARCHS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
-          VALID_APKS=()
-          for apk in "$APK_SOURCE"/*.apk; do
-            [ -f "$apk" ] || continue
-            apk_name=$(basename "$apk")
-            if [ "$ARCH" = "auto (همه)" ]; then
-              VALID_APKS+=("$apk")
-              continue
-            fi
-            if [[ "$apk_name" == "base.apk" ]] || [[ "$apk_name" == config.* ]]; then
-              VALID_APKS+=("$apk")
-              continue
-            fi
-            if [[ "$apk_name" == *"${ARCH}"* ]]; then
-              VALID_APKS+=("$apk")
-              continue
-            fi
-            HAS_KNOWN_ARCH=false
-            for known in "${KNOWN_ARCHS[@]}"; do
-              if [[ "$apk_name" == *"$known"* ]]; then
-                HAS_KNOWN_ARCH=true
-                break
-              fi
-            done
-            if ! $HAS_KNOWN_ARCH; then
-              VALID_APKS+=("$apk")
-            else
-              echo "⏭️  حذف (معماری متفاوت): $apk_name"
-            fi
-          done
-
-          if [ ${#VALID_APKS[@]} -eq 0 ]; then
-            echo "❌ هیچ APK معتبری برای معماری $ARCH یافت نشد"
+          DL_URL=$(head -1 .download_info)
+          FILENAME=$(sed -n '2p' .download_info)
+          mkdir -p release_files
+          echo "Downloading: $FILENAME"
+          curl -L --fail --progress-bar -o "release_files/$FILENAME" "$DL_URL"
+          if [ ! -s "release_files/$FILENAME" ]; then
+            echo "::error::Downloaded file is empty!"
             exit 1
           fi
 
-          echo "SPLIT=false" >> $GITHUB_ENV
-
-          if [ ${#VALID_APKS[@]} -eq 1 ]; then
-            FINAL_NAME="${DATE_PART} - ${PACKAGE}.apk"
-            SIZE=$(stat -c%s "${VALID_APKS[0]}")
-            MAX_BYTES=$((THRESH_MB * 1024 * 1024))
-            if [ "$THRESH_MB" -gt 0 ] && [ "$SIZE" -gt "$MAX_BYTES" ]; then
-              echo "✂️ تقسیم فایل APK"
-              zip -j -s "${THRESH_MB}m" "$FINAL_DIR/${FINAL_NAME}.zip" "${VALID_APKS[0]}"
-              echo "SPLIT=true" >> $GITHUB_ENV
-            else
-              cp "${VALID_APKS[0]}" "$FINAL_DIR/$FINAL_NAME"
-            fi
-          else
-            echo "🔄 ادغام ${#VALID_APKS[@]} فایل Split APK"
-            TEMP_MERGE="/tmp/merge_apks"
-            mkdir -p "$TEMP_MERGE"
-            for vapk in "${VALID_APKS[@]}"; do
-              cp "$vapk" "$TEMP_MERGE/"
-            done
-            cd "$TEMP_MERGE" || exit 1
-            FINAL_ARCHIVE="${DATE_PART} - ${PACKAGE}.apks"
-            zip -r "$FINAL_DIR/$FINAL_ARCHIVE" ./*.apk
-            cd - || exit 1
-            # --- بررسی سایز فایل APKS و split در صورت نیاز ---
-            SIZE=$(stat -c%s "$FINAL_DIR/$FINAL_ARCHIVE")
-            MAX_BYTES=$((THRESH_MB * 1024 * 1024))
-            if [ "$THRESH_MB" -gt 0 ] && [ "$SIZE" -gt "$MAX_BYTES" ]; then
-              echo "✂️ تقسیم فایل APKS"
-              # پاک کردن فایل اصلی بعد از split
-              cd "$FINAL_DIR" || exit 1
-              zip -s "${THRESH_MB}m" "${FINAL_ARCHIVE}.zip" "$FINAL_ARCHIVE"
-              rm "$FINAL_ARCHIVE"
-              cd - || exit 1
-              echo "SPLIT=true" >> $GITHUB_ENV
-            fi
-            # -----------------------------------------------
-            rm -rf "$TEMP_MERGE"
-          fi
-
-          rm -rf /tmp/apkeep_dl /tmp/extracted_apks 2>/dev/null
-
-      - name: 🔗 نمایش لینک هوشمند به فایل‌ها
+      - name: ✂️ Split Large File (if needed)
+        id: split
         run: |
-          FOLDER="$FINAL_DIR"
-          WORKSPACE="${{ github.workspace }}"
-          REL_DIR=$(echo "$FOLDER" | sed "s|^${WORKSPACE}/||")
-          ENCODED_DIR=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${REL_DIR}', safe='/'))")
-
-          if [ "$SPLIT" = "true" ]; then
-            echo "### 📁 فایل‌ها (چند تکه):" >> $GITHUB_STEP_SUMMARY
-            echo "[مشاهده پوشه دانلود](https://github.com/${{ github.repository }}/tree/main/${ENCODED_DIR})" >> $GITHUB_STEP_SUMMARY
+          FILENAME="${{ steps.retrieve.outputs.filename }}"
+          THRESH_MB="${{ github.event.inputs.max_part_mb }}"
+          if [[ "$THRESH_MB" -le 0 ]] || [[ "$THRESH_MB" -gt 1900 ]]; then
+            THRESH_MB=1800
+          fi
+          FILESIZE=$(stat -c%s "release_files/$FILENAME" 2>/dev/null || echo 0)
+          THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
+          if [ "$FILESIZE" -gt "$THRESH_BYTES" ]; then
+            echo "🔪 Splitting into ${THRESH_MB}MB parts..."
+            BASE="${FILENAME%.*}"
+            cd release_files
+            zip -r -s "${THRESH_MB}m" "${BASE}.zip" "./$FILENAME"
+            rm -- "$FILENAME"
+            cd ..
+            echo "SPLIT=true" >> $GITHUB_ENV
+            echo "Parts created:"
+            ls -lh release_files/
           else
-            FILE=$(ls "$FOLDER" | head -1)
-            ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FILE}', safe='/'))")
-            RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/${ENCODED_DIR}/${ENCODED_FILE}"
-            echo "### 📁 فایل دانلود شده:" >> $GITHUB_STEP_SUMMARY
-            echo "[دانلود مستقیم ${FILE}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
+            echo "📦 No split needed ($(( FILESIZE / 1024 / 1024 )) MB)"
+            echo "SPLIT=false" >> $GITHUB_ENV
           fi
 
-      - name: ذخیره و آپلود
+      - name: 📤 Push to Repository
+        if: github.event.inputs.upload_method == 'repository (push to repo)'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "$OUTPUT_FOLDER/"
-          git commit -m "دانلود APK: $PACKAGE [skip ci]" || echo "بدون تغییر"
+          
+          # ساخت پوشه اختصاصی برای این دانلود
+          VID="${{ steps.retrieve.outputs.vid }}"
+          DATE=$(date +'%Y.%m.%d')
+          FOLDER="downloads/YouTube/${DATE} - ${VID}"
+          mkdir -p "$FOLDER"
+          
+          # انتقال همهٔ فایل‌ها به پوشه جدید
+          mv release_files/* "$FOLDER/"
+          
+          # ذخیره مسیر پوشه برای میانبر
+          echo "DOWNLOAD_FOLDER=${FOLDER}" >> $GITHUB_ENV
+          
+          git add downloads/
+          git commit -m "⬇️ YouTube: ${{ steps.retrieve.outputs.filename }} [skip ci]" || echo "Nothing to commit"
           git push
+
+      - name: 📤 Upload to GitHub Releases
+        if: github.event.inputs.upload_method == 'release (GitHub Releases)'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}
+          name: ${{ format('YouTube - {0}', steps.retrieve.outputs.filename) }}
+          body: |
+            **📽️ YouTube Download**
+            **Title:** ${{ steps.retrieve.outputs.title }}
+            **Original Link:** ${{ github.event.inputs.video_url }}
+            **Quality:** ${{ github.event.inputs.desired_quality }}
+            **Format:** ${{ github.event.inputs.output_format }}
+          files: release_files/*
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
+
+      - name: 🔗 لینک مستقیم به پوشه فایل‌ها
+        if: always() && (steps.retrieve.outcome == 'success')
+        run: |
+          REPO="${{ github.repository }}"
+          if [ "${{ github.event.inputs.upload_method }}" = "repository (push to repo)" ]; then
+            FOLDER="${{ env.DOWNLOAD_FOLDER }}"
+            ENCODED_FOLDER=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FOLDER}', safe='/'))")
+            FOLDER_URL="https://github.com/${REPO}/tree/main/${ENCODED_FOLDER}"
+            
+            echo "### 📁 پوشه دانلود:" >> $GITHUB_STEP_SUMMARY
+            echo "[مشاهده فایل‌ها در ${FOLDER}](${FOLDER_URL})" >> $GITHUB_STEP_SUMMARY
+            
+            if [ "$SPLIT" = "false" ]; then
+              # اگر فقط یک فایل است، لینک مستقیم raw هم بده
+              FILENAME=$(ls "$FOLDER" | head -1)
+              ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FILENAME}', safe=''))")
+              RAW_URL="https://raw.githubusercontent.com/${REPO}/main/${ENCODED_FOLDER}/${ENCODED_FILE}"
+              echo "### ⬇️ دانلود مستقیم:" >> $GITHUB_STEP_SUMMARY
+              echo "[${FILENAME}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "💡 فایل به چند قسمت تقسیم شده، همه را از پوشه بالا دانلود کنید." >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            TAG="${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}"
+            RELEASE_URL="https://github.com/${REPO}/releases/tag/${TAG}"
+            echo "### 📦 فایل در Release:" >> $GITHUB_STEP_SUMMARY
+            echo "[مشاهده Release](${RELEASE_URL})" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🧹 Cleanup
+        if: always()
+        run: rm -rf release_files .download_info 2>/dev/null || true
