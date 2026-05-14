@@ -1,4 +1,4 @@
-name: 'دانلودر یوتیوب'
+name: 'دانلودر یوتیوب (Piped)'
 
 on:
   workflow_dispatch:
@@ -16,135 +16,174 @@ on:
           - 'mp3 (audio only)'
         default: 'mp4 (video)'
       desired_quality:
-        description: 'کیفیت (ویدیو: 720p, 1080p | صدا: 192kbps, 320kbps)'
+        description: 'کیفیت (ویدیو: 360p, 720p, 1080p | صدا: 128kbps, 192kbps)'
         required: false
         type: string
         default: '720p'
       max_part_mb:
-        description: 'حداکثر حجم هر قسمت (MB) – 0 = خودکار ۱۸۰۰ مگابایت'
+        description: 'حداکثر حجم هر قسمت (MB) – 0 = 1800'
         required: false
         type: string
         default: '90'
       upload_method:
-        description: '📤 روش ذخیره نهایی'
+        description: '📤 روش ذخیره'
         required: true
         type: choice
         options:
           - 'repository (push to repo)'
           - 'release (GitHub Releases)'
         default: 'repository (push to repo)'
-      release_tag:
-        description: '🏷️ نام تگ ریلیز (فقط در صورت انتخاب Release)'
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: write
 
 jobs:
-  youtube-download:
+  download:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: 📂 Checkout Repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🔧 نصب yt-dlp و ابزارها
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y zip ffmpeg
-          pip install --quiet yt-dlp
-
-      - name: 📥 دانلود ویدیو/صدا
+      - name: استخراج video ID
         run: |
           URL="${{ github.event.inputs.video_url }}"
+          VID=$(echo "$URL" | sed -n 's/.*v=\([a-zA-Z0-9_-]\{11\}\).*/\1/p')
+          if [ -z "$VID" ]; then
+            echo "::error::شناسه ویدیو پیدا نشد"
+            exit 1
+          fi
+          echo "VID=$VID" >> $GITHUB_ENV
+
+      - name: دریافت لینک‌های استریم از Piped
+        run: |
+          VID="${{ env.VID }}"
+          # لیست نمونه‌های Piped (ترجیحاً سریع)
+          INSTANCES=(
+            "https://pipedapi.kavin.rocks"
+            "https://pipedapi.tokhmi.xyz"
+            "https://pipedapi.syncpundit.io"
+            "https://pipedapi.moomoo.me"
+            "https://pipedapi.adminforge.de"
+            "https://pipedapi.leptons.xyz"
+          )
+          STREAMS=""
+          for BASE in "${INSTANCES[@]}"; do
+            echo "تلاش با $BASE ..."
+            RESP=$(curl -s --max-time 15 "${BASE}/streams/${VID}")
+            if echo "$RESP" | jq -e '.videoStreams' >/dev/null 2>&1; then
+              STREAMS="$RESP"
+              break
+            fi
+          done
+          if [ -z "$STREAMS" ]; then
+            echo "::error::هیچ نمونه Piped در دسترس نیست"
+            exit 1
+          fi
+          echo "$STREAMS" > streams.json
+          echo "✅ اطلاعات استریم دریافت شد"
+
+      - name: انتخاب استریم مناسب و دانلود
+        run: |
           FORMAT="${{ github.event.inputs.output_format }}"
           QUAL="${{ github.event.inputs.desired_quality }}"
-          MAX_MB="${{ github.event.inputs.max_part_mb }}"
-
-          # ساخت پوشهٔ خروجی
           mkdir -p release_files
 
           if [ "$FORMAT" = "mp3 (audio only)" ]; then
-            # دانلود صدا با کیفیت درخواستی
+            # انتخاب بهترین audio با bitrate نزدیک
             BITRATE=$(echo "$QUAL" | sed 's/kbps//')
-            yt-dlp -f "bestaudio[ext=m4a]" \
-              --extract-audio \
-              --audio-format mp3 \
-              --audio-quality "${BITRATE}" \
-              -o "release_files/%(title)s.%(ext)s" \
-              "$URL"
+            AUDIO_URL=$(jq -r --arg BR "$BITRATE" '
+              .audioStreams
+              | map(select(.bitrate != null))
+              | sort_by(.bitrate)
+              | last
+              | .url' streams.json)
+            if [ -z "$AUDIO_URL" ]; then
+              echo "::error::استریم صوتی پیدا نشد"
+              exit 1
+            fi
+            echo "دانلود صدا ..."
+            curl -L -o "release_files/audio.webm" "$AUDIO_URL"
+            ffmpeg -y -i "release_files/audio.webm" -b:a "${BITRATE}k" "release_files/output.mp3"
+            rm "release_files/audio.webm"
           else
-            # دانلود ویدیو با کیفیت درخواستی
-            # تبدیل کیفیت به فرمت yt-dlp: مثلاً 720p -> bestvideo[height<=720]+bestaudio
+            # کیفیت ویدیو: تبدیل ورودی به حداکثر ارتفاع
             HEIGHT=$(echo "$QUAL" | sed 's/p//')
-            yt-dlp -f "bestvideo[height<=${HEIGHT}]+bestaudio/best[height<=${HEIGHT}]" \
-              --merge-output-format mp4 \
-              -o "release_files/%(title)s.%(ext)s" \
-              "$URL"
+            # انتخاب بهترین ویدیو با ارتفاع <= درخواستی
+            VIDEO_URL=$(jq -r --arg H "$HEIGHT" '
+              .videoStreams
+              | map(select(.height != null and .height <= ($H|tonumber)))
+              | sort_by(.height)
+              | last
+              | .url' streams.json)
+            # انتخاب بهترین صدا
+            AUDIO_URL=$(jq -r '
+              .audioStreams
+              | map(select(.bitrate != null))
+              | sort_by(.bitrate)
+              | last
+              | .url' streams.json)
+
+            if [ -z "$VIDEO_URL" ] || [ -z "$AUDIO_URL" ]; then
+              echo "::error::استریم ویدیو/صدا یافت نشد"
+              exit 1
+            fi
+            echo "دانلود ویدیو ..."
+            curl -L -o "release_files/video.webm" "$VIDEO_URL"
+            echo "دانلود صدا ..."
+            curl -L -o "release_files/audio.webm" "$AUDIO_URL"
+            echo "ادغام با ffmpeg ..."
+            ffmpeg -y -i "release_files/video.webm" -i "release_files/audio.webm" -c copy "release_files/output.mp4"
+            rm "release_files/video.webm" "release_files/audio.webm"
           fi
 
-          # اگر فایلی دانلود نشد، خطا بده
-          if [ -z "$(ls -A release_files)" ]; then
-            echo "::error::هیچ فایلی دانلود نشد!"
+          if [ ! -s release_files/output.* ]; then
+            echo "::error::فایل خروجی ایجاد نشد"
             exit 1
           fi
-
           echo "✅ دانلود کامل شد"
           ls -lh release_files/
 
-      - name: ✂️ تقسیم فایل حجیم (در صورت نیاز)
+      - name: تقسیم فایل در صورت نیاز
         run: |
           MAX_MB="${{ github.event.inputs.max_part_mb }}"
-          if [ "$MAX_MB" -le 0 ] || [ "$MAX_MB" -gt 1900 ]; then
+          if [ "$MAX_MB" -le 0 ] || [ "$MAX_MB" -gt 1800 ]; then
             MAX_MB=1800
           fi
-
           cd release_files
-          for file in *; do
-            if [ ! -f "$file" ]; then
-              continue
-            fi
-            SIZE=$(stat -c%s "$file")
-            MAX_BYTES=$((MAX_MB * 1024 * 1024))
-            if [ "$SIZE" -gt "$MAX_BYTES" ]; then
-              echo "🔪 تقسیم $file به قطعات ${MAX_MB}MB"
-              BASE="${file%.*}"
-              zip -r -s "${MAX_MB}m" "${BASE}.zip" "./$file"
-              rm -- "$file"
-            else
-              echo "📦 $file نیازی به تقسیم ندارد ($(( SIZE / 1024 / 1024 )) MB)"
+          for f in *; do
+            if [ ! -f "$f" ]; then continue; fi
+            SIZE=$(stat -c%s "$f")
+            if [ "$SIZE" -gt $((MAX_MB * 1024 * 1024)) ]; then
+              echo "🔪 تقسیم $f به ${MAX_MB}MB ..."
+              BASE="${f%.*}"
+              zip -r -s "${MAX_MB}m" "${BASE}.zip" "./$f"
+              rm "$f"
             fi
           done
           ls -lh
 
-      - name: 📤 ذخیره در مخزن (Push to Repository)
+      - name: ذخیره در مخزن
         if: github.event.inputs.upload_method == 'repository (push to repo)'
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "bot@github.com"
           mkdir -p downloads
           mv release_files/* downloads/
           git add downloads/
-          git commit -m "⬇️ YouTube: $(ls downloads/ | head -1) [skip ci]" || echo "Nothing to commit"
+          git commit -m "⬇️ YouTube: ${{ env.VID }}" || echo "Nothing to commit"
           git push
 
-      - name: 📤 آپلود در GitHub Releases
+      - name: آپلود در Releases
         if: github.event.inputs.upload_method == 'release (GitHub Releases)'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}
+          tag_name: ${{ format('yt-{0}', github.run_number) }}
           name: "دانلود یوتیوب – ${{ github.run_number }}"
-          body: |
-            **📽️ لینک اصلی:** ${{ github.event.inputs.video_url }}
-            **کیفیت/فرمت:** ${{ github.event.inputs.desired_quality }} / ${{ github.event.inputs.output_format }}
-            **تاریخ دانلود:** $(date '+%Y-%m-%d %H:%M:%S')
           files: release_files/*
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: false
           prerelease: false
 
-      - name: 🧹 پاک‌سازی (همیشه اجرا شود)
+      - name: پاک‌سازی
         if: always()
-        run: rm -rf release_files
+        run: rm -rf release_files streams.json
