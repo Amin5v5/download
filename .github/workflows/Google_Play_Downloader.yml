@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '⚡️ حالت اجرا (Fast = فقط Artifact، Full = ذخیره در مخزن)'
+        description: '⚡️ حالت اجرا (Full = ذخیره در مخزن، Fast = فقط Artifact)'
         required: true
         type: choice
         options:
-          - 'Fast (فقط دانلود، بدون commit)'
           - 'Full (دانلود + commit در مخزن)'
-        default: 'Fast (فقط دانلود، بدون commit)'
+          - 'Fast (فقط دانلود، بدون commit)'
+        default: 'Full (دانلود + commit در مخزن)'
       package_name:
         description: '📦 نام پکیج یا لینک گوگل‌پلی'
         required: true
@@ -51,6 +51,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
+      # Checkout only for Full mode (now default)
       - name: ⚡️ Checkout (only for Full mode)
         if: github.event.inputs.mode == 'Full (دانلود + commit در مخزن)' || github.event_name == 'repository_dispatch'
         uses: actions/checkout@v4
@@ -116,9 +117,7 @@ jobs:
           ARCH="$ARCHITECTURE"
           THRESH_MB="$MAX_PART_MB"
 
-          # تعیین پوشه نهایی بر اساس حالت
           if [ "$MODE" = "Fast" ]; then
-            # در حالت Fast، از پوشه workspace استفاده کن (قابل اطمینان‌تر از /tmp)
             FINAL_DIR="$GITHUB_WORKSPACE/fast_output"
           else
             BASE="${BASE_FOLDER}/${DATE_PART} - ${PACKAGE}"
@@ -230,7 +229,7 @@ jobs:
           echo "STATUS=success" >> $GITHUB_ENV
           rm -rf /tmp/apkeep_dl /tmp/extracted_apks 2>/dev/null
 
-      - name: 📊 نمایش جدول وضعیت و لینک (فارسی)
+      - name: 📊 نمایش جدول وضعیت (فارسی)
         run: |
           SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
           SIZE_KB=$(echo "scale=2; $TOTAL_SIZE / 1024" | bc)
@@ -276,14 +275,13 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "> 🕒 زمان اتمام: $(date)" >> $GITHUB_STEP_SUMMARY
 
-      - name: ✅ Verify artifact file exists (Fast mode)
+      - name: ✅ Verify artifact file exists (Fast mode only)
         if: env.MODE == 'Fast' && env.STATUS == 'success'
         run: |
           if [ ! -f "$FINAL_DIR/$FINAL_FILENAME" ]; then
             echo "ERROR: File not found at $FINAL_DIR/$FINAL_FILENAME"
             exit 1
           fi
-          echo "File size: $(stat -c%s "$FINAL_DIR/$FINAL_FILENAME") bytes"
 
       - name: 💾 Save and upload to repository (Full mode only)
         if: env.MODE == 'Full'
