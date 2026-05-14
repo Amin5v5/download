@@ -1,4 +1,4 @@
-name: 'دانلود APK (بدون نیاز به حساب)'
+name: 'دانلود از گوگل پلی'
 
 on:
   workflow_dispatch:
