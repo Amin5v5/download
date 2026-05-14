@@ -1,7 +1,69 @@
-name: Test
-on: workflow_dispatch
+name: 'دانلود ویدیو یوتیوب'
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'لینک ویدیو'
+        required: true
+        type: string
+      quality:
+        description: 'کیفیت'
+        required: true
+        type: choice
+        default: 'best'
+        options:
+          - 'best'
+          - '1080p'
+          - '720p'
+          - '480p'
+          - '360p'
+      max_part_mb:
+        description: 'حداکثر حجم قطعه (MB)'
+        required: true
+        type: number
+        default: 85
+
 jobs:
-  test:
+  download:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "OK"
+      - uses: actions/checkout@v4
+
+      - uses: AnimMouse/setup-yt-dlp@v3
+
+      - name: دانلود
+        run: |
+          mkdir -p /tmp/video
+          yt-dlp -f "${{ github.event.inputs.quality }}" \
+            -o "/tmp/video/%(title)s.%(ext)s" \
+            "${{ github.event.inputs.url }}"
+
+      - name: بسته‌بندی و ذخیره
+        run: |
+          MAX_MB="${{ github.event.inputs.max_part_mb }}"
+          DATE=$(date +'%Y.%m.%d')
+          DEST="downloads/YouTube/${DATE}"
+          mkdir -p "$DEST"
+          FILE=$(ls /tmp/video/* | head -1)
+          SIZE=$(stat -c%s "$FILE")
+          MAX_BYTES=$((MAX_MB * 1024 * 1024))
+          if [ "$SIZE" -gt "$MAX_BYTES" ] && [ "$MAX_MB" -gt 0 ]; then
+            split -b "${MAX_MB}m" "$FILE" "$DEST/$(basename "$FILE").part"
+          else
+            cp "$FILE" "$DEST/"
+          fi
+          cat > "$DEST/README.txt" <<EOF
+📦 راهنما:
+- اگر یک فایل ویدیویی دیدید، مستقیم پخش کنید.
+- اگر چند تکه .part دیدید، با دستور cat در کامپیوتر یا ZArchiver در گوشی ترکیب کنید.
+EOF
+          echo "DEST=$DEST" >> $GITHUB_ENV
+
+      - name: آپلود
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "bot@github.com"
+          git add "${{ env.DEST }}"
+          git commit -m "YouTube: ${{ github.event.inputs.url }}" || echo "بدون تغییر"
+          git push
