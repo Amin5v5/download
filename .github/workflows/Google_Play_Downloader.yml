@@ -103,6 +103,9 @@ jobs:
             APK_SOURCE="/tmp/apkeep_dl"
           fi
 
+          # لیست معماری‌های شناخته‌شده
+          KNOWN_ARCHS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
+
           # جمع‌آوری APKهای معتبر
           VALID_APKS=()
           for apk in "$APK_SOURCE"/*.apk; do
@@ -114,10 +117,29 @@ jobs:
               continue
             fi
 
-            # فیلتر هوشمند: base و config همیشه لازم‌اند
+            # base و config همیشه لازم‌اند
             if [[ "$apk_name" == "base.apk" ]] || [[ "$apk_name" == config.* ]]; then
               VALID_APKS+=("$apk")
-            elif [[ "$apk_name" == *"${ARCH}"* ]]; then
+              continue
+            fi
+
+            # بررسی وجود معماری درخواستی
+            if [[ "$apk_name" == *"${ARCH}"* ]]; then
+              VALID_APKS+=("$apk")
+              continue
+            fi
+
+            # اگر نام فایل هیچ معماری شناخته‌شده‌ای ندارد -> APK یونیورسال
+            HAS_KNOWN_ARCH=false
+            for known in "${KNOWN_ARCHS[@]}"; do
+              if [[ "$apk_name" == *"$known"* ]]; then
+                HAS_KNOWN_ARCH=true
+                break
+              fi
+            done
+
+            if ! $HAS_KNOWN_ARCH; then
+              # احتمالاً APK یونیورسال (مناسب برای همه معماری‌ها)
               VALID_APKS+=("$apk")
             else
               echo "⏭️  حذف (معماری متفاوت): $apk_name"
@@ -129,7 +151,7 @@ jobs:
             exit 1
           fi
 
-          # ادغام به یک APK (با استفاده از bundletool یا zip)
+          # ادغام به یک APK
           if [ ${#VALID_APKS[@]} -eq 1 ]; then
             # فقط یک فایل APK
             FINAL_NAME="${DATE_PART} - ${PACKAGE}.apk"
