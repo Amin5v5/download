@@ -51,13 +51,15 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      # Checkout only for Full mode (now default)
-      - name: ⚡️ Checkout (only for Full mode)
+      # Checkout only for Full mode با sparse-checkout برای سرعت بالا
+      - name: ⚡️ Checkout سریع (فقط پوشه مورد نیاز)
         if: github.event.inputs.mode == 'Full (دانلود + commit در مخزن)' || github.event_name == 'repository_dispatch'
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
           filter: blob:none
+          sparse-checkout: |
+            downloads/GooglePlay/
 
       - name: ⚙️ Set variables from repository_dispatch
         if: github.event_name == 'repository_dispatch'
