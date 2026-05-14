@@ -16,9 +16,17 @@ on:
           - 'mp3 (audio only)'
         default: 'mp4 (video)'
       desired_quality:
-        description: 'کیفیت (ویدیو: 720p, 1080p | صدا: 192kbps, 320kbps)'
-        required: false
-        type: string
+        description: 'کیفیت / بیتریت'
+        required: true
+        type: choice
+        options:
+          - '720p'
+          - '1080p'
+          - '360p'
+          - '192kbps'
+          - '320kbps'
+          - '128kbps'
+          - '64kbps'
         default: '720p'
       max_part_mb:
         description: 'حداکثر حجم هر قسمت (MB) - 0 = خودکار ۱۸۰۰ مگابایت'
@@ -70,9 +78,13 @@ jobs:
 
           is_audio = FMT == 'mp3'
           if is_audio:
-              QUAL = QUAL if QUAL in ('64kbps','128kbps','192kbps','320kbps') else '192kbps'
+              # اگر کیفیت شامل kbps نبود، از 192kbps پیش‌فرض استفاده کن
+              if 'kbps' not in QUAL:
+                  QUAL = '192kbps'
           else:
-              QUAL = QUAL if QUAL in ('720p','1080p') else '720p'
+              # اگر کیفیت شامل p نبود، 720p پیش‌فرض
+              if 'p' not in QUAL:
+                  QUAL = '720p'
 
           payload = {
               "url": URL,
@@ -171,6 +183,9 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p downloads
           mv release_files/* downloads/
+          # ذخیره مسیر نسبی فایل‌ها برای مرحله نمایش لینک
+          echo "DOWNLOAD_DIR=downloads" >> $GITHUB_ENV
+          echo "FILE_NAME=${{ steps.retrieve.outputs.filename }}" >> $GITHUB_ENV
           git add downloads/
           git commit -m "⬇️ YouTube: ${{ steps.retrieve.outputs.filename }} [skip ci]" || echo "Nothing to commit"
           git push
@@ -195,6 +210,24 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: false
           prerelease: false
+
+      - name: 🔗 لینک مستقیم به فایل دانلود شده
+        if: always() && (steps.retrieve.outcome == 'success')
+        run: |
+          REPO="${{ github.repository }}"
+          if [ "${{ github.event.inputs.upload_method }}" = "repository (push to repo)" ]; then
+            # لینک به فایل در مخزن (raw)
+            ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FILE_NAME}', safe=''))")
+            RAW_URL="https://raw.githubusercontent.com/${REPO}/main/downloads/${ENCODED_FILE}"
+            echo "### 📁 فایل دانلود شده:" >> $GITHUB_STEP_SUMMARY
+            echo "[${FILE_NAME}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
+          else
+            # لینک به صفحه Release
+            TAG="${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}"
+            RELEASE_URL="https://github.com/${REPO}/releases/tag/${TAG}"
+            echo "### 📦 فایل در Release:" >> $GITHUB_STEP_SUMMARY
+            echo "[مشاهده Release](${RELEASE_URL})" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: 🧹 Cleanup
         if: always()
