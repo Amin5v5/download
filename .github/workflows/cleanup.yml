@@ -1,0 +1,232 @@
+name: '🧹 پاکسازی فایل‌های دانلود شده'
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: '🎯 کدام بخش پاک شود؟'
+        required: true
+        type: choice
+        options:
+          - 'Google Play'
+          - 'YouTube'
+          - 'Both'
+        default: 'Both'
+      delete_all:
+        description: '🗑️ حذف همه فایل‌ها (نادیده گرفتن سایر فیلترها)'
+        required: false
+        type: boolean
+        default: false
+      older_than_days:
+        description: '📅 حذف فایل‌های قدیمی‌تر از (روز) - ۰ = بدون محدودیت'
+        required: false
+        type: number
+        default: 30
+      package_name_filter:
+        description: '📦 فیلتر نام پکیج (فقط Google Play) - مثال: com.example.app'
+        required: false
+        type: string
+        default: ''
+      video_id_filter:
+        description: '🎬 فیلتر آیدی ویدیو (فقط YouTube) - مثال: dQw4w9WgXcQ'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: '🔍 فقط نمایش فایل‌های قابل حذف (بدون حذف واقعی)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⚡️ Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: |
+            downloads/
+
+      - name: 📋 تعیین پارامترها و یافتن فایل‌ها
+        id: find_files
+        run: |
+          TARGET="${{ github.event.inputs.target }}"
+          DELETE_ALL="${{ github.event.inputs.delete_all == 'true' }}"
+          OLDER_DAYS="${{ github.event.inputs.older_than_days }}"
+          PACKAGE_FILTER="${{ github.event.inputs.package_name_filter }}"
+          VIDEO_FILTER="${{ github.event.inputs.video_id_filter }}"
+          DRY_RUN="${{ github.event.inputs.dry_run == 'true' }}"
+
+          # دایرکتوری‌های پایه
+          BASE_DIRS=()
+          if [[ "$TARGET" == "Google Play" || "$TARGET" == "Both" ]]; then
+            BASE_DIRS+=("downloads/GooglePlay")
+          fi
+          if [[ "$TARGET" == "YouTube" || "$TARGET" == "Both" ]]; then
+            BASE_DIRS+=("downloads/YouTube")
+          fi
+
+          # آرایه ذخیره مسیرهای قابل حذف
+          TO_DELETE=()
+
+          # تابع برای افزودن مسیرها با در نظر گرفتن فیلترها
+          process_dir() {
+            local base="$1"
+            local type="$2"  # gp یا yt
+            find "$base" -mindepth 1 -maxdepth 1 -type d | while read -r dir; do
+              local dirname=$(basename "$dir")
+              # بررسی حذف همه
+              if [[ "$DELETE_ALL" == "true" ]]; then
+                TO_DELETE+=("$dir")
+                continue
+              fi
+              # فیلتر تاریخ (بر اساس نام پوشه: فرمت YYYY.MM.DD)
+              if [[ "$OLDER_DAYS" -gt 0 ]]; then
+                # استخراج تاریخ از نام پوشه (اولین کلمه قبل از فاصله)
+                date_part=$(echo "$dirname" | awk '{print $1}')
+                if [[ "$date_part" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$ ]]; then
+                  dir_epoch=$(date -d "${date_part//./-}" +%s 2>/dev/null || echo 0)
+                  now_epoch=$(date +%s)
+                  age_days=$(( (now_epoch - dir_epoch) / 86400 ))
+                  if [[ $age_days -lt $OLDER_DAYS ]]; then
+                    continue
+                  fi
+                fi
+              fi
+              # فیلتر نام پکیج (برای Google Play)
+              if [[ "$type" == "gp" && -n "$PACKAGE_FILTER" ]]; then
+                if [[ ! "$dirname" == *"$PACKAGE_FILTER"* ]]; then
+                  continue
+                fi
+              fi
+              # فیلتر آیدی ویدیو (برای YouTube)
+              if [[ "$type" == "yt" && -n "$VIDEO_FILTER" ]]; then
+                if [[ ! "$dirname" == *"$VIDEO_FILTER"* ]]; then
+                  continue
+                fi
+              fi
+              # اگر به اینجا رسید، پوشه قابل حذف است
+              TO_DELETE+=("$dir")
+            done
+          }
+
+          # اجرای پردازش برای هر دایرکتوری پایه
+          for base in "${BASE_DIRS[@]}"; do
+            if [[ "$base" == *"GooglePlay" ]]; then
+              process_dir "$base" "gp"
+            elif [[ "$base" == *"YouTube" ]]; then
+              process_dir "$base" "yt"
+            fi
+          done
+
+          # ذخیره لیست در فایل برای مراحل بعد
+          printf "%s\n" "${TO_DELETE[@]}" > to_delete.txt
+          echo "COUNT=${#TO_DELETE[@]}" >> $GITHUB_ENV
+          if [[ ${#TO_DELETE[@]} -eq 0 ]]; then
+            echo "NOTHING_TO_DELETE=true" >> $GITHUB_ENV
+          else
+            echo "NOTHING_TO_DELETE=false" >> $GITHUB_ENV
+          fi
+
+      - name: 🗑️ حذف فایل‌ها (یا نمایش در حالت dry-run)
+        run: |
+          DRY_RUN="${{ github.event.inputs.dry_run == 'true' }}"
+          if [[ "$NOTHING_TO_DELETE" == "true" ]]; then
+            echo "هیچ فایلی برای حذف یافت نشد."
+            exit 0
+          fi
+
+          echo "فایل‌های زیر حذف خواهند شد:"
+          cat to_delete.txt
+          echo "-----------------------"
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "🔍 حالت dry-run: هیچ چیزی واقعاً حذف نشد."
+            # برای نمایش در جدول، یک فایل خالی ایجاد نمی‌کنیم
+            exit 0
+          fi
+
+          # حذف واقعی
+          while IFS= read -r dir; do
+            if [[ -d "$dir" ]]; then
+              rm -rf "$dir"
+              echo "✅ حذف: $dir"
+            fi
+          done < to_delete.txt
+
+          # حذف پوشه‌های خالی باقی‌مانده (فقط سطح اول)
+          TARGET="${{ github.event.inputs.target }}"
+          if [[ "$TARGET" == "Google Play" || "$TARGET" == "Both" ]]; then
+            find downloads/GooglePlay -type d -empty -delete 2>/dev/null || true
+          fi
+          if [[ "$TARGET" == "YouTube" || "$TARGET" == "Both" ]]; then
+            find downloads/YouTube -type d -empty -delete 2>/dev/null || true
+          fi
+
+      - name: 📊 گزارش نهایی و commit تغییرات
+        if: always() && (env.NOTHING_TO_DELETE != 'true')
+        run: |
+          DRY_RUN="${{ github.event.inputs.dry_run == 'true' }}"
+          COUNT="${{ env.COUNT }}"
+          TARGET="${{ github.event.inputs.target }}"
+          DELETE_ALL="${{ github.event.inputs.delete_all }}"
+          OLDER_DAYS="${{ github.event.inputs.older_than_days }}"
+          PACKAGE_FILTER="${{ github.event.inputs.package_name_filter }}"
+          VIDEO_FILTER="${{ github.event.inputs.video_id_filter }}"
+
+          # ساختن جدول فارسی در step summary
+          echo "## 📋 گزارش پاکسازی" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| وضعیت | هدف | فیلترها | تعداد حذف | حالت |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|------|---------|-----------|------|" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            STATUS_ICON="🔍 نمایش (حذف نشد)"
+          else
+            STATUS_ICON="✅ انجام شد"
+          fi
+
+          FILTER_DESC=""
+          if [[ "$DELETE_ALL" == "true" ]]; then
+            FILTER_DESC="حذف همه"
+          else
+            if [[ "$OLDER_DAYS" -gt 0 ]]; then
+              FILTER_DESC="قدیمی‌تر از ${OLDER_DAYS} روز"
+            fi
+            if [[ -n "$PACKAGE_FILTER" ]]; then
+              FILTER_DESC="${FILTER_DESC} + پکیج: ${PACKAGE_FILTER}"
+            fi
+            if [[ -n "$VIDEO_FILTER" ]]; then
+              FILTER_DESC="${FILTER_DESC} + ویدیو: ${VIDEO_FILTER}"
+            fi
+            if [[ -z "$FILTER_DESC" ]]; then
+              FILTER_DESC="بدون فیلتر (همه)"
+            fi
+          fi
+
+          echo "| $STATUS_ICON | $TARGET | $FILTER_DESC | $COUNT | $([ "$DRY_RUN" == "true" ] && echo "dry-run" || echo "real") |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # اگر dry-run نبود، commit و push
+          if [[ "$DRY_RUN" != "true" && "$COUNT" -gt 0 ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add downloads/
+            git commit -m "🧹 Cleanup: removed ${COUNT} items from ${TARGET} [skip ci]" || true
+            git push
+            echo "✅ تغییرات به مخزن ارسال شد." >> $GITHUB_STEP_SUMMARY
+          elif [[ "$DRY_RUN" == "true" ]]; then
+            echo "ℹ️ حالت dry-run: هیچ تغییری در مخزن اعمال نشد." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ هیچ تغییری برای commit وجود ندارد." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🧹 پاکسازی فایل موقت
+        if: always()
+        run: rm -f to_delete.txt
