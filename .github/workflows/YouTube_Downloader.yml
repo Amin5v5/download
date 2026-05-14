@@ -1,22 +1,22 @@
-name: 'دانلودر یوتیوب'
+name: '📥 دانلودر یوتیوب'
 
 on:
   workflow_dispatch:
     inputs:
       video_url:
-        description: 'YouTube video URL'
+        description: '🔗 لینک ویدیوی یوتیوب'
         required: true
         type: string
       output_format:
-        description: 'نوع خروجی'
+        description: '🎬 نوع خروجی'
         required: true
         type: choice
         options:
-          - 'mp4 (video)'
-          - 'mp3 (audio only)'
-        default: 'mp4 (video)'
+          - 'mp4 (ویدیو)'
+          - 'mp3 (فقط صدا)'
+        default: 'mp4 (ویدیو)'
       desired_quality:
-        description: 'کیفیت / بیتریت'
+        description: '🎚️ کیفیت / بیت‌ریت'
         required: true
         type: choice
         options:
@@ -30,7 +30,7 @@ on:
           - '64kbps'
         default: '720p'
       max_part_mb:
-        description: 'حداکثر حجم هر قسمت (MB) - 0 = خودکار ۱۸۰۰ مگابایت'
+        description: '✂️ حداکثر حجم هر قسمت (MB) - ۰ = خودکار ۱۸۰۰ مگابایت'
         required: false
         type: string
         default: '90'
@@ -39,9 +39,9 @@ on:
         required: true
         type: choice
         options:
-          - 'repository (push to repo)'
-          - 'release (GitHub Releases)'
-        default: 'repository (push to repo)'
+          - 'repository (ذخیره در مخزن)'
+          - 'release (انتشار در GitHub Releases)'
+        default: 'repository (ذخیره در مخزن)'
       release_tag:
         description: '🏷️ نام تگ ریلیز (فقط در صورت انتخاب Release)'
         required: false
@@ -56,18 +56,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: 📂 Checkout Repository
+      - name: ⚡️ Checkout سریع
         uses: actions/checkout@v4
         with:
+          fetch-depth: 1
+          filter: blob:none
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🔧 Install Dependencies
+      - name: 🔧 نصب پیش‌نیازها
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y zip curl python3 python3-pip
           pip3 install --quiet requests
 
-      - name: 🔗 Get Download Link
+      - name: 🔗 دریافت لینک دانلود
         id: retrieve
         run: |
           python3 << 'EOF'
@@ -131,26 +133,25 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"filename={fname}\n")
               f.write(f"title={title}\n")
-              f.write(f"vid={vid}\n")   # برای نام پوشه
+              f.write(f"vid={vid}\n")
           EOF
         env:
           INPUT_URL: ${{ github.event.inputs.video_url }}
-          INPUT_FORMAT: ${{ github.event.inputs.output_format == 'mp3 (audio only)' && 'mp3' || 'mp4' }}
+          INPUT_FORMAT: ${{ github.event.inputs.output_format == 'mp4 (ویدیو)' && 'mp4' || 'mp3' }}
           INPUT_QUALITY: ${{ github.event.inputs.desired_quality }}
 
-      - name: 📥 Download File
+      - name: 📥 دانلود فایل
         run: |
           DL_URL=$(head -1 .download_info)
           FILENAME=$(sed -n '2p' .download_info)
           mkdir -p release_files
-          echo "Downloading: $FILENAME"
-          curl -L --fail --progress-bar -o "release_files/$FILENAME" "$DL_URL"
+          curl -L --fail --progress-bar -o "release_files/$FILENAME" "$DL_URL" > /dev/null 2>&1
           if [ ! -s "release_files/$FILENAME" ]; then
             echo "::error::Downloaded file is empty!"
             exit 1
           fi
 
-      - name: ✂️ Split Large File (if needed)
+      - name: ✂️ تقسیم فایل بزرگ (در صورت نیاز)
         id: split
         run: |
           FILENAME="${{ steps.retrieve.outputs.filename }}"
@@ -161,44 +162,40 @@ jobs:
           FILESIZE=$(stat -c%s "release_files/$FILENAME" 2>/dev/null || echo 0)
           THRESH_BYTES=$((THRESH_MB * 1024 * 1024))
           if [ "$FILESIZE" -gt "$THRESH_BYTES" ]; then
-            echo "🔪 Splitting into ${THRESH_MB}MB parts..."
             BASE="${FILENAME%.*}"
             cd release_files
-            zip -r -s "${THRESH_MB}m" "${BASE}.zip" "./$FILENAME"
+            zip -r -s "${THRESH_MB}m" "${BASE}.zip" "./$FILENAME" > /dev/null
             rm -- "$FILENAME"
             cd ..
             echo "SPLIT=true" >> $GITHUB_ENV
-            echo "Parts created:"
-            ls -lh release_files/
+            # محاسبه حجم کل (مجموع قسمت‌ها)
+            TOTAL_SIZE=$(du -sb release_files/ | cut -f1)
+            echo "TOTAL_SIZE=$TOTAL_SIZE" >> $GITHUB_ENV
           else
-            echo "📦 No split needed ($(( FILESIZE / 1024 / 1024 )) MB)"
             echo "SPLIT=false" >> $GITHUB_ENV
+            echo "TOTAL_SIZE=$FILESIZE" >> $GITHUB_ENV
           fi
 
-      - name: 📤 Push to Repository
-        if: github.event.inputs.upload_method == 'repository (push to repo)'
+      - name: 📤 آپلود در مخزن (repository)
+        if: github.event.inputs.upload_method == 'repository (ذخیره در مخزن)'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # ساخت پوشه اختصاصی برای این دانلود
           VID="${{ steps.retrieve.outputs.vid }}"
           DATE=$(date +'%Y.%m.%d')
           FOLDER="downloads/YouTube/${DATE} - ${VID}"
           mkdir -p "$FOLDER"
           
-          # انتقال همهٔ فایل‌ها به پوشه جدید
           mv release_files/* "$FOLDER/"
-          
-          # ذخیره مسیر پوشه برای میانبر
           echo "DOWNLOAD_FOLDER=${FOLDER}" >> $GITHUB_ENV
           
           git add downloads/
-          git commit -m "⬇️ YouTube: ${{ steps.retrieve.outputs.filename }} [skip ci]" || echo "Nothing to commit"
+          git commit -m "⬇️ YouTube: ${{ steps.retrieve.outputs.filename }} [skip ci]" || true
           git push
 
-      - name: 📤 Upload to GitHub Releases
-        if: github.event.inputs.upload_method == 'release (GitHub Releases)'
+      - name: 📤 آپلود در GitHub Releases
+        if: github.event.inputs.upload_method == 'release (انتشار در GitHub Releases)'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}
@@ -214,35 +211,64 @@ jobs:
           draft: false
           prerelease: false
 
-      - name: 🔗 لینک مستقیم به پوشه فایل‌ها
+      - name: 📊 نمایش جدول وضعیت (فارسی)
         if: always() && (steps.retrieve.outcome == 'success')
         run: |
-          REPO="${{ github.repository }}"
-          if [ "${{ github.event.inputs.upload_method }}" = "repository (push to repo)" ]; then
+          FILENAME="${{ steps.retrieve.outputs.filename }}"
+          TITLE="${{ steps.retrieve.outputs.title }}"
+          QUALITY="${{ github.event.inputs.desired_quality }}"
+          FORMAT="${{ github.event.inputs.output_format }}"
+          TOTAL_SIZE="${{ env.TOTAL_SIZE }}"
+          SPLIT_STATUS="${{ env.SPLIT }}"
+          UPLOAD_METHOD="${{ github.event.inputs.upload_method }}"
+          
+          # محاسبه حجم به صورت خوانا
+          SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1048576" | bc)
+          SIZE_KB=$(echo "scale=2; $TOTAL_SIZE / 1024" | bc)
+          if (( $(echo "$SIZE_MB >= 1" | bc -l) )); then
+            SIZE_HR="${SIZE_MB} MB"
+          else
+            SIZE_HR="${SIZE_KB} KB"
+          fi
+          
+          echo "## 📋 گزارش نهایی دانلود" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| وضعیت | عنوان | کیفیت | فرمت | حجم کل | تاریخ |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|-------|------|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ موفق | \`${TITLE}\` | \`${QUALITY}\` | \`${FORMAT}\` | ${SIZE_HR} | $(date +'%Y-%m-%d %H:%M:%S') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # لینک دسترسی بر اساس روش آپلود
+          if [[ "$UPLOAD_METHOD" == *"repository"* ]]; then
+            REPO="${{ github.repository }}"
             FOLDER="${{ env.DOWNLOAD_FOLDER }}"
             ENCODED_FOLDER=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FOLDER}', safe='/'))")
             FOLDER_URL="https://github.com/${REPO}/tree/main/${ENCODED_FOLDER}"
             
-            echo "### 📁 پوشه دانلود:" >> $GITHUB_STEP_SUMMARY
-            echo "[مشاهده فایل‌ها در ${FOLDER}](${FOLDER_URL})" >> $GITHUB_STEP_SUMMARY
+            echo "### 📁 لینک دسترسی به پوشه (ذخیره شده در مخزن)" >> $GITHUB_STEP_SUMMARY
+            echo "[➡️ کلیک کنید تا فایل‌ها را در ${FOLDER} ببینید](${FOLDER_URL})" >> $GITHUB_STEP_SUMMARY
             
-            if [ "$SPLIT" = "false" ]; then
-              # اگر فقط یک فایل است، لینک مستقیم raw هم بده
-              FILENAME=$(ls "$FOLDER" | head -1)
-              ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${FILENAME}', safe=''))")
+            if [ "$SPLIT_STATUS" = "false" ]; then
+              # لینک مستقیم raw
+              RAW_FILENAME=$(ls "$FOLDER" | head -1)
+              ENCODED_FILE=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${RAW_FILENAME}', safe=''))")
               RAW_URL="https://raw.githubusercontent.com/${REPO}/main/${ENCODED_FOLDER}/${ENCODED_FILE}"
-              echo "### ⬇️ دانلود مستقیم:" >> $GITHUB_STEP_SUMMARY
-              echo "[${FILENAME}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "### ⬇️ لینک دانلود مستقیم (فایل یک تکه)" >> $GITHUB_STEP_SUMMARY
+              echo "[دانلود ${RAW_FILENAME}](${RAW_URL})" >> $GITHUB_STEP_SUMMARY
             else
-              echo "💡 فایل به چند قسمت تقسیم شده، همه را از پوشه بالا دانلود کنید." >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "💡 فایل به چند قسمت ${SIZE_HR} تقسیم شده است. همه قسمت‌ها را از پوشه بالا دانلود کنید." >> $GITHUB_STEP_SUMMARY
             fi
           else
             TAG="${{ github.event.inputs.release_tag != '' && github.event.inputs.release_tag || format('yt-{0}', github.run_number) }}"
             RELEASE_URL="https://github.com/${REPO}/releases/tag/${TAG}"
-            echo "### 📦 فایل در Release:" >> $GITHUB_STEP_SUMMARY
-            echo "[مشاهده Release](${RELEASE_URL})" >> $GITHUB_STEP_SUMMARY
+            echo "### 📦 فایل در GitHub Releases" >> $GITHUB_STEP_SUMMARY
+            echo "[➡️ مشاهده Release](${RELEASE_URL})" >> $GITHUB_STEP_SUMMARY
           fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 🕒 زمان اتمام: $(date)" >> $GITHUB_STEP_SUMMARY
 
-      - name: 🧹 Cleanup
+      - name: 🧹 پاکسازی
         if: always()
         run: rm -rf release_files .download_info 2>/dev/null || true
